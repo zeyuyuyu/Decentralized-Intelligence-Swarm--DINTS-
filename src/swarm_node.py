@@ -1,107 +1,93 @@
 import asyncio
-import json
 import random
-from typing import Dict, List, Set
 from dataclasses import dataclass
-from datetime import datetime
+from typing import List, Optional, Set
 
 @dataclass
-class PeerInfo:
-    id: str
-    address: str
-    last_seen: datetime
-    capabilities: List[str]
+class NodeState:
+    node_id: str
+    is_leader: bool = False
+    term: int = 0
+    voted_for: Optional[str] = None
+    known_peers: Set[str] = None
+
+    def __post_init__(self):
+        if self.known_peers is None:
+            self.known_peers = set()
 
 class SwarmNode:
-    def __init__(self, node_id: str, host: str, port: int):
-        self.node_id = node_id
-        self.host = host
-        self.port = port
-        self.peers: Dict[str, PeerInfo] = {}
-        self.active_connections: Set[str] = set()
-        self.capabilities = ['compute', 'storage', 'network']
+    def __init__(self, node_id: str = None):
+        self.node_id = node_id or hex(random.getrandbits(32))[2:]
+        self.state = NodeState(node_id=self.node_id)
+        self.election_timeout = random.uniform(1.5, 3.0)
+        self.last_heartbeat = 0
+        self.running = False
 
     async def start(self):
-        server = await asyncio.start_server(
-            self._handle_connection, self.host, self.port
+        """Start the swarm node and begin participating in the network"""
+        self.running = True
+        await asyncio.gather(
+            self.run_election_timer(),
+            self.heartbeat_loop()
         )
-        await self._start_discovery()
-        async with server:
-            await server.serve_forever()
 
-    async def _start_discovery(self):
-        while True:
-            self._cleanup_stale_peers()
-            await self._broadcast_presence()
-            await asyncio.sleep(30)
+    async def run_election_timer(self):
+        """Monitor election timeout and initiate leader election if needed"""
+        while self.running:
+            await asyncio.sleep(0.1)
+            if (asyncio.get_event_loop().time() - self.last_heartbeat) > self.election_timeout:
+                await self.start_election()
 
-    async def _broadcast_presence(self):
-        announcement = {
-            'type': 'discovery',
-            'node_id': self.node_id,
-            'capabilities': self.capabilities,
-            'timestamp': datetime.utcnow().isoformat()
-        }
-        for peer_id, peer in self.peers.items():
-            try:
-                reader, writer = await asyncio.open_connection(
-                    *peer.address.split(':')
-                )
-                writer.write(json.dumps(announcement).encode())
-                await writer.drain()
-                writer.close()
-                await writer.wait_closed()
-            except:
-                self.active_connections.discard(peer_id)
+    async def start_election(self):
+        """Initiate leader election process"""
+        self.state.term += 1
+        self.state.voted_for = self.node_id
+        self.last_heartbeat = asyncio.get_event_loop().time()
 
-    def _cleanup_stale_peers(self, max_age_seconds: int = 300):
-        now = datetime.utcnow()
-        stale_peers = [
-            pid for pid, p in self.peers.items()
-            if (now - p.last_seen).total_seconds() > max_age_seconds
-        ]
-        for pid in stale_peers:
-            del self.peers[pid]
-            self.active_connections.discard(pid)
+        votes_received = 1  # Vote for self
+        votes_needed = (len(self.state.known_peers) + 1) // 2 + 1
 
-    async def _handle_connection(self, reader, writer):
-        try:
-            data = await reader.read(8192)
-            message = json.loads(data.decode())
-            
-            if message['type'] == 'discovery':
-                peer_id = message['node_id']
-                addr = writer.get_extra_info('peername')
-                self.peers[peer_id] = PeerInfo(
-                    id=peer_id,
-                    address=f'{addr[0]}:{addr[1]}',
-                    last_seen=datetime.utcnow(),
-                    capabilities=message['capabilities']
-                )
-                self.active_connections.add(peer_id)
+        # Request votes from all peers
+        vote_futures = [self.request_vote(peer) for peer in self.state.known_peers]
+        if vote_futures:
+            votes = await asyncio.gather(*vote_futures)
+            votes_received += sum(1 for v in votes if v)
 
-            writer.close()
-            await writer.wait_closed()
+        if votes_received >= votes_needed:
+            self.state.is_leader = True
+            print(f"Node {self.node_id} became leader for term {self.state.term}")
 
-        except Exception as e:
-            print(f'Error handling connection: {e}')
+    async def request_vote(self, peer_id: str) -> bool:
+        """Request vote from a peer node"""
+        # In real implementation, this would make an RPC call
+        # For now, simulate network delay and random voting
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        return random.random() > 0.3
 
-    async def find_peers_with_capability(self, capability: str) -> List[PeerInfo]:
-        return [
-            peer for peer in self.peers.values()
-            if capability in peer.capabilities
-        ]
+    async def heartbeat_loop(self):
+        """Send periodic heartbeats if leader"""
+        while self.running:
+            if self.state.is_leader:
+                await self.send_heartbeat()
+                await asyncio.sleep(0.5)
+            else:
+                await asyncio.sleep(0.1)
 
-    async def get_network_stats(self) -> Dict:
-        return {
-            'total_peers': len(self.peers),
-            'active_connections': len(self.active_connections),
-            'capabilities_distribution': self._get_capability_stats()
-        }
-    
-    def _get_capability_stats(self) -> Dict[str, int]:
-        stats = {}
-        for peer in self.peers.values():
-            for cap in peer.capabilities:
-                stats[cap] = stats.get(cap, 0) + 1
-        return stats
+    async def send_heartbeat(self):
+        """Send heartbeat to all peers"""
+        # In real implementation, this would make RPC calls
+        # For now, just update local heartbeat time
+        self.last_heartbeat = asyncio.get_event_loop().time()
+
+    def add_peer(self, peer_id: str):
+        """Add a new peer to the known peers set"""
+        if peer_id != self.node_id:
+            self.state.known_peers.add(peer_id)
+
+    def remove_peer(self, peer_id: str):
+        """Remove a peer from the known peers set"""
+        self.state.known_peers.discard(peer_id)
+
+    async def stop(self):
+        """Stop the swarm node"""
+        self.running = False
