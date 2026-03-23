@@ -1,45 +1,43 @@
-import swarm_node
+import numpy as np
+from swarm_node import SwarmNode
 
-class SwarmManager:
-    def __init__(self, nodes):
-        self.nodes = nodes
-        self.consensus = DistributedConsensus(nodes)
+class SwarmOptimizer:
+    def __init__(self, num_nodes, objective_function, bounds):
+        self.num_nodes = num_nodes
+        self.objective_function = objective_function
+        self.bounds = bounds
+        self.nodes = [SwarmNode(self.objective_function, self.bounds) for _ in range(self.num_nodes)]
+        self.global_best = None
+        self.global_best_score = float('inf')
 
-    def run(self):
-        self.consensus.run()
-        while True:
-            # Main swarm coordination loop
+    def run(self, max_iterations, tolerance):
+        for i in range(max_iterations):
+            # Broadcast global best to all nodes
             for node in self.nodes:
-                node.update(self.consensus.get_state())
-            self.consensus.update()
+                node.set_global_best(self.global_best)
 
-class DistributedConsensus:
-    def __init__(self, nodes):
-        self.nodes = nodes
-        self.state = {}
-        self.round = 0
+            # Update node positions and velocities
+            for node in self.nodes:
+                node.update()
 
-    def run(self):
-        while True:
-            self.round += 1
-            self.state = self.consensus_step()
-            if self.state_converged():
+            # Evaluate objective function for each node
+            scores = [node.evaluate() for node in self.nodes]
+
+            # Update global best
+            for score, node in zip(scores, self.nodes):
+                if score < self.global_best_score:
+                    self.global_best = node.position
+                    self.global_best_score = score
+
+            # Check for convergence
+            if self.global_best_score < tolerance:
                 break
 
-    def consensus_step(self):
-        new_state = {}
-        for node in self.nodes:
-            new_state[node.id] = node.propose_update(self.state)
-        return new_state
+        return self.global_best
 
-    def state_converged(self):
-        # Check if the state has converged to a consistent value
-        # across all nodes
-        pass
-
-    def get_state(self):
-        return self.state
-
-    def update(self):
-        # Update the state based on node proposals
-        pass
+if __name__ == '__main__':
+    objective_function = lambda x: np.sum(x ** 2)
+    bounds = [(-10, 10), (-10, 10), (-10, 10)]
+    optimizer = SwarmOptimizer(10, objective_function, bounds)
+    result = optimizer.run(100, 1e-6)
+    print(f'Optimal solution: {result}')
