@@ -1,43 +1,35 @@
-import numpy as np
-from swarm_node import SwarmNode
+import swarm_node
 
-class SwarmOptimizer:
-    def __init__(self, num_nodes, objective_function, bounds):
-        self.num_nodes = num_nodes
-        self.objective_function = objective_function
-        self.bounds = bounds
-        self.nodes = [SwarmNode(self.objective_function, self.bounds) for _ in range(self.num_nodes)]
-        self.global_best = None
-        self.global_best_score = float('inf')
+class SwarmManager:
+    def __init__(self):
+        self.nodes = []
 
-    def run(self, max_iterations, tolerance):
-        for i in range(max_iterations):
-            # Broadcast global best to all nodes
-            for node in self.nodes:
-                node.set_global_best(self.global_best)
+    def add_node(self, node):
+        self.nodes.append(node)
 
-            # Update node positions and velocities
-            for node in self.nodes:
-                node.update()
+    def coordinate_swarm(self):
+        # Implement distributed consensus algorithm
+        # to synchronize state across swarm nodes
+        consensus_state = self._reach_consensus()
+        for node in self.nodes:
+            node.update_state(consensus_state)
 
-            # Evaluate objective function for each node
-            scores = [node.evaluate() for node in self.nodes]
-
-            # Update global best
-            for score, node in zip(scores, self.nodes):
-                if score < self.global_best_score:
-                    self.global_best = node.position
-                    self.global_best_score = score
-
-            # Check for convergence
-            if self.global_best_score < tolerance:
-                break
-
-        return self.global_best
+    def _reach_consensus(self):
+        # Implement distributed consensus algorithm
+        # to agree on a shared swarm state
+        consensus_state = {
+            'formation': 'diamond',
+            'speed': 10,
+            'altitude': 50
+        }
+        return consensus_state
 
 if __name__ == '__main__':
-    objective_function = lambda x: np.sum(x ** 2)
-    bounds = [(-10, 10), (-10, 10), (-10, 10)]
-    optimizer = SwarmOptimizer(10, objective_function, bounds)
-    result = optimizer.run(100, 1e-6)
-    print(f'Optimal solution: {result}')
+    manager = SwarmManager()
+    node1 = swarm_node.SwarmNode(id='node1')
+    node2 = swarm_node.SwarmNode(id='node2')
+    node3 = swarm_node.SwarmNode(id='node3')
+    manager.add_node(node1)
+    manager.add_node(node2)
+    manager.add_node(node3)
+    manager.coordinate_swarm()
