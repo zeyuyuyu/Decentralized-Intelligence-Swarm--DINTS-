@@ -1,140 +1,113 @@
 import asyncio
 import json
-import time
-from dataclasses import dataclass
 from typing import Dict, Set, Optional
+from dataclasses import dataclass
+import aiohttp
 
 @dataclass
-class PeerInfo:
+class NodeInfo:
+    node_id: str
     address: str
+    capabilities: Set[str]
     last_seen: float
-    is_active: bool
 
 class SwarmNode:
-    def __init__(self, host: str, port: int, node_id: str):
+    def __init__(self, node_id: str, host: str, port: int):
+        self.node_id = node_id
         self.host = host
         self.port = port
-        self.node_id = node_id
-        self.peers: Dict[str, PeerInfo] = {}
-        self.is_running = False
-        self.heartbeat_interval = 5.0  # seconds
+        self.address = f'http://{host}:{port}'
+        self.peers: Dict[str, NodeInfo] = {}
+        self.capabilities = {'compute', 'storage'}
+        self.running = False
 
     async def start(self):
-        self.server = await asyncio.start_server(
-            self.handle_connection, self.host, self.port
+        self.running = True
+        await asyncio.gather(
+            self.discovery_heartbeat(),
+            self.prune_stale_peers(),
+            self.start_api_server()
         )
-        self.is_running = True
-        asyncio.create_task(self.heartbeat_loop())
-        print(f'Node {self.node_id} listening on {self.host}:{self.port}')
+
+    async def discovery_heartbeat(self):
+        """Regularly broadcast presence to known peers and discover new ones"""
+        while self.running:
+            async with aiohttp.ClientSession() as session:
+                for peer in list(self.peers.values()):
+                    try:
+                        async with session.post(
+                            f'{peer.address}/ping',
+                            json={
+                                'node_id': self.node_id,
+                                'address': self.address,
+                                'capabilities': list(self.capabilities)
+                            }
+                        ) as resp:
+                            if resp.status == 200:
+                                peer_data = await resp.json()
+                                await self.handle_peer_discovery(peer_data)
+                    except Exception:
+                        pass
+            await asyncio.sleep(5)
+
+    async def handle_peer_discovery(self, peer_data: dict):
+        """Process peer information and update mesh network topology"""
+        peer_id = peer_data['node_id']
+        if peer_id != self.node_id:
+            self.peers[peer_id] = NodeInfo(
+                node_id=peer_id,
+                address=peer_data['address'],
+                capabilities=set(peer_data['capabilities']),
+                last_seen=asyncio.get_event_loop().time()
+            )
+
+    async def prune_stale_peers(self):
+        """Remove peers that haven't been seen recently"""
+        while self.running:
+            current_time = asyncio.get_event_loop().time()
+            stale_peers = [
+                pid for pid, peer in self.peers.items()
+                if current_time - peer.last_seen > 30
+            ]
+            for pid in stale_peers:
+                del self.peers[pid]
+            await asyncio.sleep(10)
+
+    async def start_api_server(self):
+        """Start HTTP API server for peer communication"""
+        async def handler(request):
+            if request.path == '/ping':
+                peer_data = await request.json()
+                await self.handle_peer_discovery(peer_data)
+                return aiohttp.web.json_response({
+                    'node_id': self.node_id,
+                    'address': self.address,
+                    'capabilities': list(self.capabilities)
+                })
+
+        app = aiohttp.web.Application()
+        app.router.add_post('/ping', handler)
+        runner = aiohttp.web.AppRunner(app)
+        await runner.setup()
+        site = aiohttp.web.TCPSite(runner, self.host, self.port)
+        await site.start()
 
     async def stop(self):
-        self.is_running = False
-        self.server.close()
-        await self.server.wait_closed()
+        """Gracefully shutdown the node"""
+        self.running = False
 
-    async def handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            data = await reader.read(1024)
-            message = json.loads(data.decode())
-            
-            if message['type'] == 'discovery':
-                await self.handle_discovery(message, writer)
-            elif message['type'] == 'heartbeat':
-                await self.handle_heartbeat(message)
+    def get_peers_by_capability(self, capability: str) -> Set[NodeInfo]:
+        """Find peers that have a specific capability"""
+        return {p for p in self.peers.values() if capability in p.capabilities}
 
-            writer.close()
-            await writer.wait_closed()
-        except Exception as e:
-            print(f'Error handling connection: {e}')
-
-    async def handle_discovery(self, message: dict, writer: asyncio.StreamWriter):
-        peer_id = message['node_id']
-        peer_addr = message['address']
-        
-        if peer_id not in self.peers:
-            self.peers[peer_id] = PeerInfo(
-                address=peer_addr,
-                last_seen=time.time(),
-                is_active=True
-            )
-            print(f'New peer discovered: {peer_id} at {peer_addr}')
-
-        # Send back our peer list
-        response = {
-            'type': 'discovery_response',
-            'peers': [
-                {'id': pid, 'address': p.address}
-                for pid, p in self.peers.items()
-                if p.is_active
-            ]
-        }
-        writer.write(json.dumps(response).encode())
-        await writer.drain()
-
-    async def handle_heartbeat(self, message: dict):
-        peer_id = message['node_id']
-        if peer_id in self.peers:
-            self.peers[peer_id].last_seen = time.time()
-            self.peers[peer_id].is_active = True
-
-    async def heartbeat_loop(self):
-        while self.is_running:
-            current_time = time.time()
-            
-            # Check for inactive peers
-            for peer_id, peer in self.peers.items():
-                if current_time - peer.last_seen > self.heartbeat_interval * 3:
-                    peer.is_active = False
-                    print(f'Peer {peer_id} became inactive')
-
-            # Send heartbeat to active peers
-            for peer_id, peer in self.peers.items():
-                if peer.is_active:
-                    try:
-                        reader, writer = await asyncio.open_connection(
-                            *peer.address.split(':')
-                        )
-                        message = {
-                            'type': 'heartbeat',
-                            'node_id': self.node_id
-                        }
-                        writer.write(json.dumps(message).encode())
-                        await writer.drain()
-                        writer.close()
-                        await writer.wait_closed()
-                    except Exception as e:
-                        print(f'Failed to send heartbeat to {peer_id}: {e}')
-                        peer.is_active = False
-
-            await asyncio.sleep(self.heartbeat_interval)
-
-    async def discover_peers(self, bootstrap_nodes: Set[str]):
-        for addr in bootstrap_nodes:
-            try:
-                reader, writer = await asyncio.open_connection(
-                    *addr.split(':')
+    async def broadcast_message(self, message: dict):
+        """Send a message to all connected peers"""
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for peer in self.peers.values():
+                task = session.post(
+                    f'{peer.address}/message',
+                    json=message
                 )
-                message = {
-                    'type': 'discovery',
-                    'node_id': self.node_id,
-                    'address': f'{self.host}:{self.port}'
-                }
-                writer.write(json.dumps(message).encode())
-                await writer.drain()
-
-                data = await reader.read(1024)
-                response = json.loads(data.decode())
-
-                if response['type'] == 'discovery_response':
-                    for peer in response['peers']:
-                        if peer['id'] not in self.peers and peer['id'] != self.node_id:
-                            self.peers[peer['id']] = PeerInfo(
-                                address=peer['address'],
-                                last_seen=time.time(),
-                                is_active=True
-                            )
-
-                writer.close()
-                await writer.wait_closed()
-            except Exception as e:
-                print(f'Failed to discover peers from {addr}: {e}')
+                tasks.append(task)
+            await asyncio.gather(*tasks, return_exceptions=True)
